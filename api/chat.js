@@ -9,36 +9,20 @@ Speak naturally.
 If asked who created you, say: "I was developed by Kaif Khan."
 `;
 
-// Helper to find the best available model
-async function getBestModel() {
-    try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
-        const data = await response.json();
-        const models = data.models || [];
-        
-        // Priority: Flash (Fast) -> Pro (Smart) -> Any
-        const chatModels = models.filter(m => m.supportedGenerationMethods.includes("generateContent"));
-        const best = chatModels.find(m => m.name.includes("flash")) || chatModels[0];
-        
-        return best ? best.name.replace("models/", "") : "gemini-1.5-flash";
-    } catch (e) {
-        return "gemini-1.5-flash"; // Fallback if list fails
-    }
-}
-
-async function tryGenerate(modelName, text, history) {
-    console.log(`Attempting with model: ${modelName}`);
-    const model = genAI.getGenerativeModel({ 
-        model: modelName,
-        systemInstruction: SYSTEM_PROMPT 
-    });
-    const chat = model.startChat({ history: history || [] });
-    const result = await chat.sendMessage(text);
-    return result.response.text();
-}
+// 🛡️ THE TANK LIST: Try these in order until one works.
+// We mix experimental (fast/new) with stable (older/reliable).
+const MODEL_CANDIDATES = [
+    "gemini-1.5-flash",         // Standard Fast
+    "gemini-2.0-flash-exp",     // New Experimental (Fastest)
+    "gemini-1.5-pro",           // Standard Smart
+    "gemini-1.5-flash-latest",  // Alternate Alias
+    "gemini-1.5-pro-latest",    // Alternate Alias
+    "gemini-pro",               // Old Reliable
+    "gemini-1.0-pro"            // Legacy
+];
 
 export default async function handler(req, res) {
-    // CORS
+    // 1. CORS Headers
     res.setHeader('Access-Control-Allow-Credentials', true);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
@@ -50,33 +34,46 @@ export default async function handler(req, res) {
         const { text, history } = req.body;
         if (!text) return res.status(400).json({ error: "No text provided" });
 
-        // 1. Get the Best Model Name
-        let activeModel = await getBestModel();
-        
-        try {
-            // 2. Try to generate with that model
-            const reply = await tryGenerate(activeModel, text, history);
-            res.status(200).json({ text: reply, model: activeModel });
+        let lastError = null;
 
-        } catch (error) {
-            // ⚠️ ERROR HANDLER (503 Overloaded or 404 Not Found)
-            console.warn(`Primary model ${activeModel} failed: ${error.message}`);
-            
-            // 3. RETRY WITH BACKUP (Stable Model)
-            // If the fancy auto-detected model failed, force the standard one
-            const backupModel = "gemini-1.5-flash"; 
-            
-            if (activeModel !== backupModel) {
-                console.log(`🔄 Retrying with backup: ${backupModel}`);
-                const reply = await tryGenerate(backupModel, text, history);
-                res.status(200).json({ text: reply, model: "backup-flash" });
-            } else {
-                throw error; // If backup also failed, give up
+        // 🔄 THE LOOP: Try every model in the list
+        for (const modelName of MODEL_CANDIDATES) {
+            try {
+                console.log(`🛡️ Tank Strategy: Attempting ${modelName}...`);
+                
+                const model = genAI.getGenerativeModel({ 
+                    model: modelName,
+                    systemInstruction: SYSTEM_PROMPT 
+                });
+
+                const chat = model.startChat({ history: history || [] });
+                
+                // Set a timeout so we don't wait forever on a stuck model
+                const result = await Promise.race([
+                    chat.sendMessage(text),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 8000))
+                ]);
+
+                const response = await result.response;
+                const reply = response.text();
+
+                // ✅ VICTORY!
+                console.log(`✅ Success with: ${modelName}`);
+                return res.status(200).json({ text: reply, model: modelName });
+
+            } catch (error) {
+                console.warn(`❌ Failed (${modelName}): ${error.message}`);
+                lastError = error;
+                // CONTINUE to the next model in the list...
             }
         }
 
+        // 💀 IF WE GET HERE, NOTHING WORKED
+        console.error("💀 FATAL: All models failed.");
+        throw new Error(`All backups failed. Last error: ${lastError?.message}`);
+
     } catch (error) {
-        console.error("AI FATAL ERROR:", error);
+        console.error("Server Error:", error);
         res.status(500).json({ error: "System Busy. Please try again." });
     }
 }
