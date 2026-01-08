@@ -9,75 +9,74 @@ Speak naturally.
 If asked who created you, say: "I was developed by Kaif Khan."
 `;
 
-// Helper to find a working model dynamically
-async function getWorkingModel() {
+// Helper to find the best available model
+async function getBestModel() {
     try {
-        // 1. Ask Google for the list of models available to this Key
-        // This fixes the "404 Not Found" guessing game
-        const modelResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
-        const data = await modelResponse.json();
-        
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
+        const data = await response.json();
         const models = data.models || [];
         
-        // 2. Filter for models that support "generateContent" (Chat)
+        // Priority: Flash (Fast) -> Pro (Smart) -> Any
         const chatModels = models.filter(m => m.supportedGenerationMethods.includes("generateContent"));
-
-        // 3. Priority: Try to find a 'Flash' or 'Pro' model first
-        const flash = chatModels.find(m => m.name.includes("flash"));
-        const pro = chatModels.find(m => m.name.includes("pro"));
-        const any = chatModels[0];
-
-        // Return the best match name (removing "models/" prefix if present)
-        const selected = flash || pro || any;
+        const best = chatModels.find(m => m.name.includes("flash")) || chatModels[0];
         
-        if (!selected) throw new Error("No chat models found for this API Key.");
-        
-        return selected.name.replace("models/", "");
-
-    } catch (error) {
-        console.error("Auto-Discovery Failed:", error);
-        // Fallback to the most basic legacy model if discovery fails
-        return "gemini-pro";
+        return best ? best.name.replace("models/", "") : "gemini-1.5-flash";
+    } catch (e) {
+        return "gemini-1.5-flash"; // Fallback if list fails
     }
 }
 
+async function tryGenerate(modelName, text, history) {
+    console.log(`Attempting with model: ${modelName}`);
+    const model = genAI.getGenerativeModel({ 
+        model: modelName,
+        systemInstruction: SYSTEM_PROMPT 
+    });
+    const chat = model.startChat({ history: history || [] });
+    const result = await chat.sendMessage(text);
+    return result.response.text();
+}
+
 export default async function handler(req, res) {
-    // CORS Setup
+    // CORS
     res.setHeader('Access-Control-Allow-Credentials', true);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
-    res.setHeader(
-        'Access-Control-Allow-Headers',
-        'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version'
-    );
+    res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
 
-    if (req.method === 'OPTIONS') {
-        res.status(200).end();
-        return;
-    }
+    if (req.method === 'OPTIONS') { res.status(200).end(); return; }
 
     try {
         const { text, history } = req.body;
         if (!text) return res.status(400).json({ error: "No text provided" });
 
-        // 🔍 AUTO-DISCOVER MODEL
-        const activeModelName = await getWorkingModel();
-        console.log(`Using Auto-Discovered Model: ${activeModelName}`);
+        // 1. Get the Best Model Name
+        let activeModel = await getBestModel();
+        
+        try {
+            // 2. Try to generate with that model
+            const reply = await tryGenerate(activeModel, text, history);
+            res.status(200).json({ text: reply, model: activeModel });
 
-        const model = genAI.getGenerativeModel({ 
-            model: activeModelName,
-            systemInstruction: SYSTEM_PROMPT 
-        });
-
-        const chat = model.startChat({ history: history || [] });
-        const result = await chat.sendMessage(text);
-        const response = await result.response;
-        const reply = response.text();
-
-        res.status(200).json({ text: reply, model: activeModelName });
+        } catch (error) {
+            // ⚠️ ERROR HANDLER (503 Overloaded or 404 Not Found)
+            console.warn(`Primary model ${activeModel} failed: ${error.message}`);
+            
+            // 3. RETRY WITH BACKUP (Stable Model)
+            // If the fancy auto-detected model failed, force the standard one
+            const backupModel = "gemini-1.5-flash"; 
+            
+            if (activeModel !== backupModel) {
+                console.log(`🔄 Retrying with backup: ${backupModel}`);
+                const reply = await tryGenerate(backupModel, text, history);
+                res.status(200).json({ text: reply, model: "backup-flash" });
+            } else {
+                throw error; // If backup also failed, give up
+            }
+        }
 
     } catch (error) {
-        console.error("AI Error:", error);
-        res.status(500).json({ error: "Error: " + error.message });
+        console.error("AI FATAL ERROR:", error);
+        res.status(500).json({ error: "System Busy. Please try again." });
     }
 }
