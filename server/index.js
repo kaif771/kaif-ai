@@ -5,14 +5,11 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const SYSTEM_PROMPT = `
 You are Kaif's personal AI assistant.
 Keep responses SHORT (1 sentence max).
-Be witty, fast, and conversational.
 If asked, say you were developed by Kaif Khan.
 `;
 
-// 🛡️ PRIORITY LIST: Fast -> Smart -> Legacy
-const MODELS = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"];
-
 export default async function handler(req, res) {
+    // 1. CORS Setup
     res.setHeader('Access-Control-Allow-Credentials', true);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
@@ -22,45 +19,53 @@ export default async function handler(req, res) {
 
     try {
         const { text, history } = req.body;
-        if (!text) return res.status(400).json({ error: "No text provided" });
+        if (!text) return res.status(200).json({ text: "Please say something." });
 
-        let lastError = null;
+        console.log("📝 Received:", text);
 
-        // 🔄 TRY MODELS ONE BY ONE
-        for (const modelName of MODELS) {
+        // 2. Try the "Flash" model first (Fastest)
+        try {
+            const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash", systemInstruction: SYSTEM_PROMPT });
+            const chat = model.startChat({ history: history || [] });
+            const result = await chat.sendMessage(text);
+            const response = await result.response;
+            
+            // Success!
+            return res.status(200).json({ text: response.text() });
+
+        } catch (flashError) {
+            console.warn("⚠️ Flash failed:", flashError.message);
+
+            // 3. Fallback to "Pro" model (If Flash is missing/404)
             try {
-                const model = genAI.getGenerativeModel({ 
-                    model: modelName,
-                    systemInstruction: SYSTEM_PROMPT,
-                    generationConfig: { maxOutputTokens: 150, temperature: 0.7 }
-                });
-
+                const model = genAI.getGenerativeModel({ model: "gemini-pro", systemInstruction: SYSTEM_PROMPT });
                 const chat = model.startChat({ history: history || [] });
-                
-                // 5 Second Timeout per model to keep it snappy
-                const result = await Promise.race([
-                    chat.sendMessage(text),
-                    new Promise((_, r) => setTimeout(() => r(new Error("Timeout")), 5000))
-                ]);
-
+                const result = await chat.sendMessage(text);
                 const response = await result.response;
-                const reply = response.text();
+                
+                return res.status(200).json({ text: response.text() });
 
-                // ✅ SUCCESS
-                return res.status(200).json({ text: reply });
+            } catch (proError) {
+                // 4. IF EVERYTHING FAILS, DIAGNOSE THE ERROR
+                // We return a 200 OK so the App speaks the error description!
+                
+                console.error("🔥 All models failed:", proError.message);
+                
+                let errorMsg = "I encountered an unknown system error.";
 
-            } catch (e) {
-                console.warn(`Model ${modelName} failed: ${e.message}`);
-                lastError = e;
-                // Loop continues to next model...
+                if (proError.message.includes("429")) {
+                    errorMsg = "My daily energy quota is exceeded. Please create a new API key.";
+                } else if (proError.message.includes("404")) {
+                    errorMsg = "My AI models are missing. Your API Key might be invalid.";
+                } else if (proError.message.includes("API key not valid")) {
+                    errorMsg = "My security key is incorrect. Please check Vercel settings.";
+                }
+
+                return res.status(200).json({ text: errorMsg });
             }
         }
 
-        throw new Error("All AI models failed. Please check API Key.");
-
     } catch (error) {
-        console.error("FINAL ERROR:", error);
-        // ⚠️ SEND ERROR AS TEXT SO THE APP SPEAKS IT
-        res.status(500).json({ text: "I'm having trouble connecting to the server. Please check your API key." });
+        return res.status(200).json({ text: "Critical System Failure: " + error.message });
     }
 }
