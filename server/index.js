@@ -4,13 +4,13 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const SYSTEM_PROMPT = `
 You are Kaif's personal AI assistant.
-Keep responses SHORT (1-2 sentences).
-Speak naturally.
-If asked who created you, say: "I was developed by Kaif Khan."
+Keep responses SHORT (1 sentence max).
+Be witty, fast, and conversational.
+If asked, say you were developed by Kaif Khan.
 `;
 
 export default async function handler(req, res) {
-    // 1. CORS Headers
+    // Standard CORS
     res.setHeader('Access-Control-Allow-Credentials', true);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
@@ -20,14 +20,18 @@ export default async function handler(req, res) {
 
     try {
         const { text, history } = req.body;
-        if (!text) return res.status(400).json({ error: "No text provided" });
+        if (!text) return res.status(400).json({ error: "No text" });
 
-        // 2. Use the Standard Model
-        // With a NEW key, this is guaranteed to work.
-        // We use 'gemini-1.5-flash' because it is the fastest and most stable.
+        // ⚡ SPEED SETTINGS:
+        // temperature: 0.7 (Creative but stable)
+        // maxOutputTokens: 100 (Prevents long, slow rants)
         const model = genAI.getGenerativeModel({ 
             model: "gemini-1.5-flash",
-            systemInstruction: SYSTEM_PROMPT 
+            systemInstruction: SYSTEM_PROMPT,
+            generationConfig: {
+                maxOutputTokens: 150,
+                temperature: 0.7,
+            }
         });
 
         const chat = model.startChat({ history: history || [] });
@@ -38,12 +42,6 @@ export default async function handler(req, res) {
 
     } catch (error) {
         console.error("AI Error:", error);
-        
-        // Handle Quota Limits Gracefully
-        if (error.message.includes("429")) {
-             return res.status(503).json({ error: "I am thinking too fast! Please wait a moment." });
-        }
-        
-        res.status(500).json({ error: "Server Error: " + error.message });
+        res.status(500).json({ error: "System Busy" });
     }
 }
