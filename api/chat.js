@@ -9,18 +9,6 @@ Speak naturally.
 If asked who created you, say: "I was developed by Kaif Khan."
 `;
 
-// 🛡️ THE TANK LIST: Try these in order until one works.
-// We mix experimental (fast/new) with stable (older/reliable).
-const MODEL_CANDIDATES = [
-    "gemini-1.5-flash",         // Standard Fast
-    "gemini-2.0-flash-exp",     // New Experimental (Fastest)
-    "gemini-1.5-pro",           // Standard Smart
-    "gemini-1.5-flash-latest",  // Alternate Alias
-    "gemini-1.5-pro-latest",    // Alternate Alias
-    "gemini-pro",               // Old Reliable
-    "gemini-1.0-pro"            // Legacy
-];
-
 export default async function handler(req, res) {
     // 1. CORS Headers
     res.setHeader('Access-Control-Allow-Credentials', true);
@@ -34,12 +22,43 @@ export default async function handler(req, res) {
         const { text, history } = req.body;
         if (!text) return res.status(400).json({ error: "No text provided" });
 
+        console.log("🔍 dynamic: Fetching model list from Google...");
+
+        // 2. ASK GOOGLE: "What models do I have?"
+        const listResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
+        if (!listResp.ok) throw new Error(`Failed to list models: ${listResp.statusText}`);
+        
+        const data = await listResp.json();
+        const allModels = data.models || [];
+
+        // 3. FILTER: Only "generateContent" models (Chat models)
+        // We also excluding 'vision' specific ones to be safe
+        let candidates = allModels
+            .filter(m => m.supportedGenerationMethods.includes("generateContent"))
+            .map(m => m.name.replace("models/", ""));
+
+        // 4. SORT: Put 'flash' first (fastest), then 'pro'
+        candidates.sort((a, b) => {
+            if (a.includes('flash') && !b.includes('flash')) return -1;
+            if (!a.includes('flash') && b.includes('flash')) return 1;
+            return 0;
+        });
+
+        console.log("📋 Found Candidates:", candidates);
+
+        // 5. TRY THEM ONE BY ONE
         let lastError = null;
 
-        // 🔄 THE LOOP: Try every model in the list
-        for (const modelName of MODEL_CANDIDATES) {
+        for (const modelName of candidates) {
+            
+            // Skip the one that was overloaded earlier (optional safety)
+            if (modelName.includes("2.5")) {
+                console.log(`⚠️ Skipping ${modelName} (known unstable)`);
+                continue;
+            }
+
             try {
-                console.log(`🛡️ Tank Strategy: Attempting ${modelName}...`);
+                console.log(`🔄 Attempting: ${modelName}...`);
                 
                 const model = genAI.getGenerativeModel({ 
                     model: modelName,
@@ -48,32 +67,28 @@ export default async function handler(req, res) {
 
                 const chat = model.startChat({ history: history || [] });
                 
-                // Set a timeout so we don't wait forever on a stuck model
+                // Timeout safety (5 seconds)
                 const result = await Promise.race([
                     chat.sendMessage(text),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 8000))
+                    new Promise((_, r) => setTimeout(() => r(new Error("Timeout")), 5000))
                 ]);
 
                 const response = await result.response;
                 const reply = response.text();
 
-                // ✅ VICTORY!
-                console.log(`✅ Success with: ${modelName}`);
+                console.log(`✅ SUCCESS with ${modelName}!`);
                 return res.status(200).json({ text: reply, model: modelName });
 
-            } catch (error) {
-                console.warn(`❌ Failed (${modelName}): ${error.message}`);
-                lastError = error;
-                // CONTINUE to the next model in the list...
+            } catch (err) {
+                console.warn(`❌ Failed ${modelName}: ${err.message}`);
+                lastError = err;
             }
         }
 
-        // 💀 IF WE GET HERE, NOTHING WORKED
-        console.error("💀 FATAL: All models failed.");
-        throw new Error(`All backups failed. Last error: ${lastError?.message}`);
+        throw new Error(`All ${candidates.length} available models failed. Last error: ${lastError?.message}`);
 
     } catch (error) {
-        console.error("Server Error:", error);
-        res.status(500).json({ error: "System Busy. Please try again." });
+        console.error("🔥 FINAL SERVER ERROR:", error);
+        res.status(500).json({ error: "System Error: " + error.message });
     }
 }
