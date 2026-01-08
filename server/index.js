@@ -1,117 +1,73 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const multer = require('multer');
-const fs = require('fs');
-const path = require('path');
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-
-const app = express();
-const upload = multer({ storage: multer.memoryStorage() }); 
-app.use(cors());
-app.use(express.json());
-
-const publicPath = path.join(__dirname, 'public');
-if (fs.existsSync(publicPath)) app.use(express.static(publicPath));
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// 🔍 GLOBAL VARIABLE TO HOLD THE WORKING MODEL
-let ACTIVE_MODEL = "";
-
-// 🛠️ SELF-HEALING FUNCTION: Finds a working model automatically
-async function findWorkingModel() {
-    console.log("🔍 Scanning your API Key for available models...");
-    try {
-        // 1. Fetch all models your key can see
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
-        const data = await response.json();
-
-        if (data.error) {
-            console.error("❌ API Key Error:", data.error.message);
-            return;
-        }
-
-        const models = data.models || [];
-        
-        // 2. Filter for models that support Chat (generateContent)
-        const chatModels = models.filter(m => m.supportedGenerationMethods.includes("generateContent"));
-
-        // 3. SELECTION LOGIC (Prioritize Free/Flash, Avoid Pro-2.5 if quota is 0)
-        // We look for 'flash' first because it's usually free and unlimited.
-        const flashModel = chatModels.find(m => m.name.includes("flash"));
-        const proModel = chatModels.find(m => m.name.includes("pro") && !m.name.includes("vision"));
-        
-        // Pick the best one
-        let bestModel = flashModel || proModel || chatModels[0];
-
-        if (bestModel) {
-            // Strip the "models/" prefix if it exists
-            ACTIVE_MODEL = bestModel.name.replace("models/", "");
-            console.log(`✅ SUCCESS! Selected Model: ${ACTIVE_MODEL}`);
-            console.log(`   (Description: ${bestModel.displayName})`);
-        } else {
-            console.error("❌ No chat models found for this key.");
-        }
-
-    } catch (error) {
-        console.error("⚠️ Network Error checking models:", error.message);
-        // Fallback if network fails
-        ACTIVE_MODEL = "gemini-1.5-flash"; 
-    }
-}
-
-// Run the scan immediately on startup
-findWorkingModel();
-
-const SYSTEM_INSTRUCTION = `
-You are Kaif's personal AI assistant on a phone call.
-1. Keep your responses SHORT and CONVERSATIONAL (1-2 sentences max).
-2. Do not use bullet points or long lists. Speak naturally.
-3. If asked who created you, say: "I was developed by Kaif Khan."
+const SYSTEM_PROMPT = `
+You are Kaif's personal AI assistant.
+Keep responses SHORT (1-2 sentences).
+Speak naturally.
+If asked who created you, say: "I was developed by Kaif Khan."
 `;
 
-app.post('/api/chat', async (req, res) => {
+// 🛡️ SAFETY LIST: Only use these known stable models.
+// We DO NOT trust auto-discovery anymore.
+const SAFE_MODELS = [
+    "gemini-1.5-flash",       // Fast & Stable
+    "gemini-1.5-flash-001",   // Specific version (Backup)
+    "gemini-1.5-pro",         // Smart
+    "gemini-pro"              // Old Reliable
+];
+
+export default async function handler(req, res) {
+    // 1. CORS Headers
+    res.setHeader('Access-Control-Allow-Credentials', true);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+    res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
+
+    if (req.method === 'OPTIONS') { res.status(200).end(); return; }
+
     try {
-        // Wait 1 second if model hasn't been found yet
-        if (!ACTIVE_MODEL) await new Promise(r => setTimeout(r, 1000));
+        const { text, history } = req.body;
+        if (!text) return res.status(400).json({ error: "No text provided" });
 
-        const textInput = req.body.text;
-        const historyRaw = req.body.history || [];
+        let lastError = null;
 
-        console.log(`📨 Request received. Using: ${ACTIVE_MODEL}`);
+        // 🔄 THE LOOP: Try the safe list one by one
+        for (const modelName of SAFE_MODELS) {
+            try {
+                console.log(`🛡️ Trying Safe Model: ${modelName}...`);
+                
+                const model = genAI.getGenerativeModel({ 
+                    model: modelName,
+                    systemInstruction: SYSTEM_PROMPT 
+                });
 
-        const model = genAI.getGenerativeModel({ 
-            model: ACTIVE_MODEL,
-            systemInstruction: SYSTEM_INSTRUCTION 
-        });
+                const chat = model.startChat({ history: history || [] });
+                
+                // Timeout Limit (5 seconds)
+                const result = await Promise.race([
+                    chat.sendMessage(text),
+                    new Promise((_, r) => setTimeout(() => r(new Error("Timeout")), 5000))
+                ]);
 
-        const chat = model.startChat({ history: historyRaw });
-        
-        // Text-only mode (Siri Style)
-        if (textInput) {
-            console.log(`🗣️ User: "${textInput}"`);
-            const result = await chat.sendMessage(textInput);
-            const response = await result.response;
-            const reply = response.text();
-            
-            console.log("🤖 AI:", reply);
-            res.json({ text: reply });
-        } else {
-            res.status(400).json({ error: "No text provided" });
+                const response = await result.response;
+                const reply = response.text();
+
+                console.log(`✅ SUCCESS with: ${modelName}`);
+                return res.status(200).json({ text: reply, model: modelName });
+
+            } catch (error) {
+                console.warn(`❌ Failed (${modelName}): ${error.message}`);
+                lastError = error;
+                // If it fails, the loop automatically tries the next one in SAFE_MODELS
+            }
         }
 
+        throw new Error(`All stable models failed. Google API is down.`);
+
     } catch (error) {
-        console.error("🔥 Error:", error.message);
-        res.status(500).json({ error: error.message });
+        console.error("🔥 FINAL ERROR:", error);
+        res.status(500).json({ error: "System Busy. Please try again." });
     }
-});
-
-app.get(/(.*)/, (req, res) => {
-    const indexPath = path.join(publicPath, 'index.html');
-    if (fs.existsSync(indexPath)) res.sendFile(indexPath);
-    else res.send("<h1>React App Not Built. Run 'npm run setup'</h1>");
-});
-
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`🚀 Self-Healing Server running on port ${PORT}`));
+}
