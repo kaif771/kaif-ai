@@ -3,15 +3,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { Mic, MicOff, UserCog, History, X, Volume2, Wifi } from 'lucide-react'; 
 
-// ✅ FIX 1: Smarter URL handling
-// If you are on localhost, it tries to find your old server if the new one isn't running.
 const getApiUrl = () => {
     if (typeof window !== 'undefined') {
         const host = window.location.hostname;
-        // If running locally, check port. If Vercel Dev isn't running, assume Serverless path.
-        if (host === 'localhost') {
-            return "/api/chat"; 
-        }
+        if (host === 'localhost') return "/api/chat"; 
     }
     return "/api/chat";
 }
@@ -26,17 +21,21 @@ export default function KaifAssistant() {
   const [statusColor, setStatusColor] = useState("text-blue-400");
   const [geminiHistory, setGeminiHistory] = useState<ChatMessage[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  
+  // VOICE STATE
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [currentVoiceIndex, setCurrentVoiceIndex] = useState(0);
   const [showVoiceName, setShowVoiceName] = useState(false);
 
-  // REFS
+  // 🧠 CORE REFS
   const recognitionRef = useRef<any>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  // ✅ FIX 2: Changed 'NodeJS.Timeout' to 'any' to prevent TypeScript errors in Vite
   const silenceTimer = useRef<any>(null);
+  
+  // 🚀 NEW: This variable keeps the session alive forever
+  const sessionActive = useRef(false);
 
-  // 1. SMART VOICE LOADER
+  // 1. VOICE LOADER
   useEffect(() => {
     const loadVoices = () => {
         const voices = window.speechSynthesis.getVoices();
@@ -44,19 +43,16 @@ export default function KaifAssistant() {
         const englishVoices = voices.filter(v => v.lang.startsWith('en'));
         setAvailableVoices(englishVoices);
 
-        // Check Saved Preference
         const savedVoiceName = localStorage.getItem("kaif_preferred_voice");
         if (savedVoiceName) {
             const savedIndex = englishVoices.findIndex(v => v.name === savedVoiceName);
             if (savedIndex >= 0) { setCurrentVoiceIndex(savedIndex); return; }
         }
 
-        // Hunt for Natural/Premium Voices
         const bestVoiceIndex = englishVoices.findIndex(v => 
             v.name.includes("Microsoft Natasha") ||  
             v.name.includes("Natural") ||            
-            v.name.includes("Premium") ||            
-            v.name.includes("Google UK English Male")
+            v.name.includes("Premium")
         );
         setCurrentVoiceIndex(bestVoiceIndex >= 0 ? bestVoiceIndex : 0);
     };
@@ -78,26 +74,38 @@ export default function KaifAssistant() {
       window.speechSynthesis.speak(u);
   };
 
-  // 3. SPEECH SETUP
+  // 3. ♾️ INFINITE LISTENING SETUP
   useEffect(() => {
     if (typeof window !== 'undefined' && 'webkitSpeechRecognition' in window) {
         const recognition = new (window as any).webkitSpeechRecognition();
-        recognition.continuous = false; 
+        recognition.continuous = false; // We handle the loop manually for better control
         recognition.lang = 'en-US';
         recognition.interimResults = false;
 
         recognition.onstart = () => {
             setIsListening(true);
-            setStatusText("Listening...");
+            setStatusText("I'm Listening...");
             setStatusColor("text-cyan-400");
+            
+            // If user says nothing for 6 seconds, we restart the loop instead of quitting
             clearTimeout(silenceTimer.current);
-            silenceTimer.current = setTimeout(() => { recognition.stop(); }, 5000);
+            silenceTimer.current = setTimeout(() => { 
+                if (sessionActive.current) recognition.stop(); 
+            }, 6000);
         };
 
         recognition.onend = () => {
             setIsListening(false);
-            if (!isSpeaking && hasConnected) {
-                setStatusText("Tap to Speak");
+            
+            // 🛑 CRITICAL LOGIC: "The Loop"
+            // If the session is active and AI is NOT talking, start listening again immediately.
+            if (sessionActive.current && !isSpeaking) {
+                // Small delay to prevent CPU overload
+                setTimeout(() => {
+                    try { recognition.start(); } catch(e) {}
+                }, 100);
+            } else if (!sessionActive.current) {
+                setStatusText("Tap to Resume");
                 setStatusColor("text-gray-400");
             }
         };
@@ -111,9 +119,13 @@ export default function KaifAssistant() {
     } else {
         setStatusText("Browser Not Supported");
     }
-  }, [hasConnected, isSpeaking]);
+  }, [isSpeaking]); // Dependency: Re-bind if speaking state changes
 
   const connectAndGreet = async () => {
+    // 1. Start the Session
+    sessionActive.current = true;
+    setHasConnected(true);
+
     setStatusText("Connecting...");
     setStatusColor("text-yellow-400");
     try {
@@ -123,34 +135,31 @@ export default function KaifAssistant() {
             body: JSON.stringify({ text: "Say 'System Online'.", history: [] }),
         });
         
-        // ✅ FIX 3: Catch HTML/404 errors safely
-        if (!response.ok) throw new Error(`Server Error: ${response.status}`);
+        if (!response.ok) throw new Error("Server Error");
         
         const data = await response.json();
-        setHasConnected(true);
         speakResponse(data.text);
-    } catch (error) {
+    } catch (error: any) {
         console.error(error);
-        setStatusText("Offline / Error");
+        setStatusText("Connection Failed");
         setStatusColor("text-red-500");
-        // Alert user if they are on localhost but forgot to run Vercel Dev
-        if (window.location.hostname === 'localhost') {
-            alert("⚠️ Localhost Error: The backend (/api/chat) was not found.\n\nDid you run 'npm run dev'? That only runs the Frontend.\nTo run the backend locally, you must use: 'vercel dev'");
-        }
+        alert("Error: " + error.message);
+        sessionActive.current = false; // Stop session on error
     }
   };
 
   const handleUserMessage = async (text: string) => {
+      // Pause listening while thinking
+      sessionActive.current = true; // Ensure session stays true
       setStatusText("Thinking...");
       setStatusColor("text-yellow-400");
+
       try {
           const response = await fetch(getApiUrl(), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ text: text, history: geminiHistory }),
           });
-
-          if (!response.ok) throw new Error("API Error");
 
           const data = await response.json();
           setGeminiHistory(prev => [...prev, { role: "user", parts: [{ text: text }] }, { role: "model", parts: [{ text: data.text }] }]);
@@ -159,6 +168,8 @@ export default function KaifAssistant() {
           console.error(error);
           setStatusText("Server Error");
           setStatusColor("text-red-500");
+          // If error, try to listen again anyway
+          setTimeout(() => startListening(), 1000);
       }
   };
 
@@ -166,6 +177,10 @@ export default function KaifAssistant() {
       setIsSpeaking(true);
       setStatusText("Speaking...");
       setStatusColor("text-green-400");
+      
+      // Stop listening while speaking so it doesn't hear itself
+      if (recognitionRef.current) recognitionRef.current.stop();
+
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = 1.0; 
       utterance.pitch = 1.0; 
@@ -173,27 +188,37 @@ export default function KaifAssistant() {
 
       utterance.onend = () => {
           setIsSpeaking(false);
-          setTimeout(() => startListening(), 500); 
+          // AI finished talking -> Resume listening loop
+          if (sessionActive.current) {
+              setTimeout(() => startListening(), 500); 
+          }
       };
       window.speechSynthesis.speak(utterance);
   };
 
   const startListening = () => {
-      if (recognitionRef.current && !isListening && !isSpeaking) {
+      if (recognitionRef.current && !isListening && !isSpeaking && sessionActive.current) {
           try { recognitionRef.current.start(); } catch(e) {}
       }
   };
 
   const handleMainButton = () => {
-      if (!hasConnected) connectAndGreet();
-      else if (isListening || isSpeaking) {
+      if (!hasConnected) {
+          connectAndGreet();
+      } else if (sessionActive.current) {
+          // STOP EVERYTHING
+          sessionActive.current = false;
           if (recognitionRef.current) recognitionRef.current.stop();
           window.speechSynthesis.cancel();
           setIsListening(false);
           setIsSpeaking(false);
           setStatusText("Paused");
           setStatusColor("text-gray-400");
-      } else startListening();
+      } else {
+          // RESUME
+          sessionActive.current = true;
+          startListening();
+      }
   };
 
   // VISUALIZER
