@@ -22,14 +22,12 @@ export default async function handler(req, res) {
         const { text, history } = req.body;
         if (!text) return res.status(400).json({ error: "No text" });
 
-        // ⚡ SPEED SETTINGS:
-        // temperature: 0.7 (Creative but stable)
-        // maxOutputTokens: 100 (Prevents long, slow rants)
+        // ⚡ SPEED SETTINGS
         const model = genAI.getGenerativeModel({ 
             model: "gemini-1.5-flash",
             systemInstruction: SYSTEM_PROMPT,
             generationConfig: {
-                maxOutputTokens: 150,
+                maxOutputTokens: 150, // Short answers = Faster audio
                 temperature: 0.7,
             }
         });

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Mic, MicOff, UserCog, History, X, Volume2, Wifi, Zap } from 'lucide-react'; 
+import { Mic, MicOff, UserCog, History, X, Volume2, Wifi } from 'lucide-react'; 
 
 const getApiUrl = () => {
     if (typeof window !== 'undefined') {
@@ -14,7 +14,7 @@ const getApiUrl = () => {
 type ChatMessage = { role: 'user' | 'model'; parts: { text: string }[]; };
 
 export default function KaifAssistant() {
-  // STATES
+  // UI STATES
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [hasConnected, setHasConnected] = useState(false);
@@ -22,8 +22,8 @@ export default function KaifAssistant() {
   const [statusColor, setStatusColor] = useState("text-blue-400");
   const [geminiHistory, setGeminiHistory] = useState<ChatMessage[]>([]);
   const [showHistory, setShowHistory] = useState(false);
-  
-  // 📝 NEW: Live Subtitles
+
+  // 📝 SUBTITLES
   const [liveSubtitle, setLiveSubtitle] = useState(""); 
   const [aiSubtitle, setAiSubtitle] = useState("");
 
@@ -52,6 +52,7 @@ export default function KaifAssistant() {
             if (savedIndex >= 0) { setCurrentVoiceIndex(savedIndex); return; }
         }
 
+        // Try to find a premium voice
         const bestVoiceIndex = englishVoices.findIndex(v => 
             v.name.includes("Microsoft Natasha") ||  
             v.name.includes("Natural") ||            
@@ -68,23 +69,22 @@ export default function KaifAssistant() {
       const nextIndex = (currentVoiceIndex + 1) % availableVoices.length;
       setCurrentVoiceIndex(nextIndex);
       localStorage.setItem("kaif_preferred_voice", availableVoices[nextIndex].name);
+      
       setShowVoiceName(true);
       setTimeout(() => setShowVoiceName(false), 2000);
       
-      // Quick beep test
-      const u = new SpeechSynthesisUtterance("Voice set.");
+      const u = new SpeechSynthesisUtterance("Voice updated.");
       u.voice = availableVoices[nextIndex];
+      window.speechSynthesis.cancel();
       window.speechSynthesis.speak(u);
   };
 
-  // 2. ⚡ REAL-TIME SPEECH RECOGNITION
+  // 2. ⚡ SPEECH RECOGNITION (Snappy Mode)
   useEffect(() => {
     if (typeof window !== 'undefined' && 'webkitSpeechRecognition' in window) {
         const recognition = new (window as any).webkitSpeechRecognition();
-        
-        // 🚀 KEY CHANGE: True makes it "Snappy"
         recognition.continuous = false; 
-        recognition.interimResults = true; // Shows text WHILE you speak
+        recognition.interimResults = true; // ✨ Real-time typing
         recognition.lang = 'en-US';
 
         recognition.onstart = () => {
@@ -95,6 +95,7 @@ export default function KaifAssistant() {
         };
 
         recognition.onend = () => {
+            // IF we are supposed to be active, and AI is not talking... RESTART.
             if (sessionActive.current && !isSpeaking) {
                 isRestarting.current = true;
                 setTimeout(() => { try { recognition.start(); } catch(e) {} }, 50);
@@ -119,12 +120,10 @@ export default function KaifAssistant() {
                 }
             }
 
-            // Update UI immediately (Snappy feel)
             if (interimTranscript) setLiveSubtitle(interimTranscript);
             
-            // If we have a final sentence, send it to AI
             if (finalTranscript) {
-                setLiveSubtitle(finalTranscript); // Show final correction
+                setLiveSubtitle(finalTranscript);
                 handleUserMessage(finalTranscript);
             }
         };
@@ -135,10 +134,17 @@ export default function KaifAssistant() {
   }, [isSpeaking]); 
 
   const connectAndGreet = async () => {
+    // 🔓 AUDIO UNLOCKER: This is the magic fix for "No Audio"
+    // We play a silent sound immediately on click to wake up the browser audio engine.
+    window.speechSynthesis.cancel();
+    const unlockMsg = new SpeechSynthesisUtterance("");
+    window.speechSynthesis.speak(unlockMsg);
+
     sessionActive.current = true;
     setHasConnected(true);
     setStatusText("Connecting...");
     setStatusColor("text-yellow-400");
+    
     try {
         const response = await fetch(getApiUrl(), {
             method: 'POST',
@@ -158,8 +164,6 @@ export default function KaifAssistant() {
       sessionActive.current = true; 
       setStatusText("Thinking...");
       setStatusColor("text-purple-400");
-      
-      // Clear AI text while thinking
       setAiSubtitle("..."); 
 
       try {
@@ -182,23 +186,30 @@ export default function KaifAssistant() {
   const speakResponse = (text: string) => {
       setIsSpeaking(true);
       setIsListening(false); 
-      setLiveSubtitle(""); // Clear user text
-      setAiSubtitle(text); // Show AI text
+      setLiveSubtitle(""); 
+      setAiSubtitle(text); 
       
       setStatusText("Speaking...");
       setStatusColor("text-green-400");
       
+      // Stop listening so it doesn't hear itself
       if (recognitionRef.current) recognitionRef.current.stop();
 
       const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 1.1; // Slightly faster for snappy feel
+      // Tuning for natural speed
+      utterance.rate = 1.1; 
       utterance.pitch = 1.0; 
+      
       if (availableVoices.length > 0) utterance.voice = availableVoices[currentVoiceIndex];
 
       utterance.onend = () => {
           setIsSpeaking(false);
+          // Resume loop immediately
           if (sessionActive.current) startListening();
       };
+      
+      // Force speak
+      window.speechSynthesis.cancel();
       window.speechSynthesis.speak(utterance);
   };
 
@@ -212,6 +223,7 @@ export default function KaifAssistant() {
       if (!hasConnected) {
           connectAndGreet();
       } else if (sessionActive.current) {
+          // STOP
           sessionActive.current = false;
           if (recognitionRef.current) recognitionRef.current.stop();
           window.speechSynthesis.cancel();
@@ -222,6 +234,7 @@ export default function KaifAssistant() {
           setLiveSubtitle("");
           setAiSubtitle("");
       } else {
+          // RESUME
           sessionActive.current = true;
           startListening();
       }
@@ -263,7 +276,7 @@ export default function KaifAssistant() {
       <style>{` .neon-text { background: linear-gradient(to right, #ffffff, #3b82f6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; } .scrollbar-hide::-webkit-scrollbar { display: none; } `}</style>
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_120%,#0f172a_0%,#000000_60%)] -z-20" />
       
-      {/* SIRI RING */}
+      {/* GLOW RING */}
       <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[300px] h-[300px] rounded-full blur-[80px] -z-20 transition-all duration-300
           ${(isListening || isRestarting.current) ? 'bg-cyan-500/30' : isSpeaking ? 'bg-green-500/30' : 'bg-transparent'}
       `} />
@@ -283,24 +296,24 @@ export default function KaifAssistant() {
       <div className={`absolute top-[35%] left-1/2 -translate-x-1/2 -translate-y-1/2 w-full text-center z-10 px-4 transition-opacity duration-500 ${showHistory ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}>
         <h1 className="text-5xl md:text-7xl font-black tracking-tight leading-none mb-2">KAIF<br /><span className="neon-text">ASSISTANT</span></h1>
         
-        {/* 🎬 NEW: SUBTITLES & STATUS */}
+        {/* 📝 SUBTITLES AREA */}
         <div className="min-h-[100px] flex flex-col items-center justify-center mt-6 gap-2">
              
-             {/* USER LIVE TEXT */}
+             {/* USER TEXT (Live Typing) */}
              {liveSubtitle && (
                  <div className="px-6 py-2 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-md animate-in slide-in-from-bottom-2 fade-in">
                     <p className="text-lg font-medium text-cyan-300">"{liveSubtitle}"</p>
                  </div>
              )}
 
-             {/* AI RESPONSE TEXT */}
+             {/* AI TEXT (Response) */}
              {isSpeaking && aiSubtitle && (
                  <div className="px-6 py-3 rounded-2xl bg-blue-500/10 border border-blue-500/20 backdrop-blur-md max-w-md mx-auto animate-in zoom-in-95 fade-in">
                     <p className="text-xl font-semibold text-white leading-relaxed">{aiSubtitle}</p>
                  </div>
              )}
 
-             {/* STATUS OR VOICE NAME */}
+             {/* STATUS / VOICE */}
              {!liveSubtitle && !isSpeaking && (
                  <div className="h-8 flex items-center justify-center">
                     {showVoiceName && availableVoices[currentVoiceIndex] ? (
@@ -333,7 +346,7 @@ export default function KaifAssistant() {
         </div>
       </div>
       
-      {/* HISTORY OVERLAY (unchanged) */}
+      {/* HISTORY PANEL */}
       <div className={`absolute inset-0 z-30 bg-[#020205]/95 backdrop-blur-xl transition-transform duration-500 ${showHistory ? 'translate-y-0' : 'translate-y-full'}`}>
           <div className="flex flex-col h-full p-6 pt-20 max-w-2xl mx-auto">
               <div className="flex justify-between items-center mb-6"><h2 className="text-2xl font-bold text-white">History</h2><button onClick={() => setGeminiHistory([])} className="text-xs text-red-400 hover:text-red-300 uppercase tracking-widest">Clear All</button></div>
